@@ -3,7 +3,7 @@
 # project subdirectory.
 #
 
-PROJECT_NAME := potbot2
+PROJECT_NAME := potbot
 
 include $(IDF_PATH)/make/project.mk
 
