@@ -5,205 +5,176 @@
 #include <stdlib.h>
 #include <sys/_timeval.h>
 #include <sys/time.h>
+#include <math.h>
+#include "esp_timer.h"
 
-#include "../components/u8g2/csrc/u8g2.h"
-#include "../components/u8g2/csrc/u8x8.h"
-#include "u8g2_esp32_hal.h"
-
-#include "driver/gpio.h"
-#include "driver/adc.h"
-#if CONFIG_IDF_TARGET_ESP32
-#include "esp_adc_cal.h"
-#endif
-
-// SDA - GPIO21
-#define PIN_SDA 21
-// SCL - GPIO22
-#define PIN_SCL 22
-
-// pins for selecting the serial MUX input
-#define PIN_S0 16
-#define PIN_S1 17
-#define PIN_S2 18
-#define GPIO_OUTPUT_MUX_PIN_SEL ((1ULL<<PIN_S0) | (1ULL<<PIN_S1) | (1ULL<<PIN_S2))
+#include "pins.h"
+#include "oled/oled.h"
+#include "adc/adc.h"
+#include "mux/mux.h"
 
 #define SENSOR_COUNT 3
-
-#define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
-#define NO_OF_SAMPLES   64          //Multisampling
-
-#if CONFIG_IDF_TARGET_ESP32
-static esp_adc_cal_characteristics_t *adc_chars;
-static const adc_channel_t channel = ADC_CHANNEL_6;     //GPIO34 if ADC1, GPIO14 if ADC2
-static const adc_bits_width_t width = ADC_WIDTH_BIT_12;
-#elif CONFIG_IDF_TARGET_ESP32S2
-static const adc_channel_t channel = ADC_CHANNEL_6;     // GPIO7 if ADC1, GPIO17 if ADC2
-static const adc_bits_width_t width = ADC_WIDTH_BIT_13;
-#endif
-static const adc_atten_t atten = ADC_ATTEN_DB_0;
-static const adc_unit_t unit = ADC_UNIT_1;
-
-static const char *TAG = "sh1106";
-
-
-#if CONFIG_IDF_TARGET_ESP32
-static void check_efuse(void)
-{
-	//Check TP is burned into eFuse
-	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_TP) == ESP_OK) {
-		printf("eFuse Two Point: Supported\n");
-	} else {
-		printf("eFuse Two Point: NOT supported\n");
-	}
-
-	//Check Vref is burned into eFuse
-	if (esp_adc_cal_check_efuse(ESP_ADC_CAL_VAL_EFUSE_VREF) == ESP_OK) {
-		printf("eFuse Vref: Supported\n");
-	} else {
-		printf("eFuse Vref: NOT supported\n");
-	}
-}
-
-static void print_char_val_type(esp_adc_cal_value_t val_type)
-{
-	if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
-		printf("Characterized using Two Point Value\n");
-	} else if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
-		printf("Characterized using eFuse Vref\n");
-	} else {
-		printf("Characterized using Default Vref\n");
-	}
-}
-#endif
+#define SENSOR_MIN 1250
+#define SENSOR_MAX 3605
 
 uint8_t sensor = 0;
-uint8_t mux_select_bits[3] = {0,0,0};
-uint8_t mux_select_pins[3] = {PIN_S0, PIN_S1, PIN_S2};
 uint32_t sensor_values[SENSOR_COUNT];
+static const char* sensor_labels[SENSOR_COUNT] = { "Busuioc", "Menta", "Oregano" };
+static uint8_t mux_select_pins[3] = {PIN_S0, PIN_S1, PIN_S2};
 
-void initialize_mux_pins() {
-	gpio_config_t io_conf = {
-			.intr_type = GPIO_INTR_DISABLE,
-			.mode = GPIO_MODE_OUTPUT,
-			.pin_bit_mask = GPIO_OUTPUT_MUX_PIN_SEL,
-			.pull_down_en = 0,
-			.pull_up_en = 0
-	};
+adc_t config;
+u8g2_t u8g2; // a structure which will contain all the data for one display
+display_data_t displayData;
 
-	gpio_config(&io_conf);
-}
-
-void initialize_adc_pins() {
-#if CONFIG_IDF_TARGET_ESP32
-	//Check if Two Point or Vref are burned into eFuse
-	check_efuse();
-#endif
-	//Configure ADC
-	if (unit == ADC_UNIT_1) {
-		adc1_config_width(width);
-		adc1_config_channel_atten(channel, atten);
-	} else {
-		adc2_config_channel_atten((adc2_channel_t)channel, atten);
-	}
-
-#if CONFIG_IDF_TARGET_ESP32
-	//Characterize ADC
-	adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
-	esp_adc_cal_value_t val_type = esp_adc_cal_characterize(unit, atten, width, DEFAULT_VREF, adc_chars);
-	print_char_val_type(val_type);
-#endif
-}
-
-void select_mux_input(uint8_t input) {
-	for(int j = 0; j< 3; ++j) {
-		mux_select_bits[j] = (sensor & (1 << j)) ? 1: 0;
-		gpio_set_level(mux_select_pins[j], mux_select_bits[j]);
-	}
-}
-
-
-
-void task_sensor_read(void* ignore) {
+void task_sensor_read(void* configParam) {
+	adc_t* config = (adc_t*)configParam;
 	while(1) {
 		for(sensor = 0; sensor < SENSOR_COUNT; ++sensor) {
-			select_mux_input(sensor);
-
-			uint32_t adc_reading = 0;
-			//Multisampling
-			for (int i = 0; i < NO_OF_SAMPLES; i++) {
-				if (unit == ADC_UNIT_1) {
-					adc_reading += adc1_get_raw((adc1_channel_t)channel);
-				} else {
-					int raw;
-					adc2_get_raw((adc2_channel_t)channel, width, &raw);
-					adc_reading += raw;
-				}
-			}
-			adc_reading /= NO_OF_SAMPLES;
-
+			select_mux_input(sensor, mux_select_pins);
+			uint32_t adc_reading = read_adc_pin(config);
 			sensor_values[sensor] = adc_reading;
-
-			vTaskDelay(1000 / portTICK_RATE_MS);
 		}
 	}
 }
 
+void renderFrames(display_data_t* data, uint8_t frames[2], int16_t x, int16_t y, bool transitioning) {
+	u8g2_t* display = data->display;
+
+	ESP_LOGI(TAG, "u8g2_ClearBuffer");
+	u8g2_ClearBuffer(display);
+	for(uint8_t i = 0; i< 2; ++i){
+		data->frames[frames[i]](display, x + i * display->width, 0, frames[i], transitioning, data->frame_data);
+	}
+
+	ESP_LOGI(TAG, "u8g2_SendBuffer");
+	u8g2_SendBuffer(display);
+}
+
+
+void task_update_display(void* displayParam) {
+	display_data_t* data = (display_data_t*)displayParam;
+	u8g2_t* display = data->display;
+
+
+	int16_t x = 0;
+	uint8_t frames[2];
+	uint8_t current_frame = 0;
+
+	while (1) {
+
+		frames[0] = current_frame;
+		frames[1] = (current_frame + 1) % data->frame_count;
+
+		renderFrames(data, frames, x, 0, false);
+
+		vTaskDelay(data->frame_duration_ms / portTICK_RATE_MS);
+
+		TickType_t xLastWakeTime;
+		xLastWakeTime = xTaskGetTickCount ();
+		const TickType_t xFrequency = 10;
+
+		TickType_t xWakeTime = xLastWakeTime;
+		for(;;) {
+			// Wait for the next cycle.
+			vTaskDelayUntil( &xLastWakeTime, xFrequency );
+
+			int16_t delta = display->width  * (xLastWakeTime - xWakeTime) / data->frame_transition_ms;
+			if(delta > 0) {
+				x = fmax(-display->width, x-delta);
+				xWakeTime = xLastWakeTime;
+			}
+
+			renderFrames(data, frames, x, 0, true);
+
+			if (x == - display->width) {
+				x = 0;
+				current_frame=frames[1];
+
+				break;
+			}
+		}
+
+
+		//		ESP_LOGI(TAG, "u8g2_DrawBox");
+		//		u8g2_DrawBox(display, 0, 26, sensor_values[sensor], 6);
+		//		u8g2_DrawFrame(display, 0, 26, 100, 6);
+
+
+		//		ESP_LOGI(TAG, "u8g2_SetFont");
+		//		u8g2_SetFont(display, u8g2_font_8x13_mf);
+		//
+		//		u8g2_uint_t text_width = u8g2_GetStrWidth(display, sensor_labels[sensor]);
+		//		u8g2_uint_t display_width = u8g2_GetDisplayWidth(display);
+		//		u8g2_uint_t text_position = (display_width - text_width) / 2;
+		//		u8g2_DrawStr(display, text_position, 17, sensor_labels[sensor]);
+		//
+		//		char *text;
+		//		asprintf(&text, "%2d", delta);
+		//		//		asprintf(&text, "T%2d S%d-%d%d%d V%d", delta, sensor, mux_select_bits[2], mux_select_bits[1],mux_select_bits[0], sensor_values[sensor]);
+		//		//		asprintf(&text, "S%d-%d%d%d V%d", sensor, mux_select_bits[2], mux_select_bits[1],mux_select_bits[0], sensor_values[sensor]);
+		//
+		//		ESP_LOGI(TAG, "u8g2_DrawStr");
+		//		u8g2_DrawStr(display, 2, 35, text);
+		//		free(text);
+
+
+		//vTaskDelay(10 / portTICK_RATE_MS);
+	}
+}
+
+void sensor_reading_render(u8g2_t* display, int16_t ox, int16_t oy, uint8_t sensor, bool transitioning, void* ignore) {
+	u8g2_SetFont(display, u8g2_font_8x13_mf);
+	u8g2_uint_t text_width = u8g2_GetStrWidth(display, sensor_labels[sensor]);
+	u8g2_uint_t display_width = u8g2_GetDisplayWidth(display);
+	u8g2_uint_t text_position = (display_width - text_width) / 2;
+	u8g2_DrawStr(display, ox+text_position, oy+17, sensor_labels[sensor]);
+
+	uint32_t normalizedSensorValue = fmax(0, fmin(SENSOR_MAX, SENSOR_MAX - sensor_values[sensor]));
+	float sensorPercentage = fmax(0, fmin(1, (normalizedSensorValue * 1.0 ) / (SENSOR_MAX - SENSOR_MIN)));
+
+	char *text;
+	asprintf(&text, "%2.1f%%", sensorPercentage*100.0);
+	text_width = u8g2_GetStrWidth(display, text);
+	text_position = (display_width - text_width) / 2;
+	u8g2_DrawStr(display, ox+text_position, oy+50, text);
+	free(text);
+
+//	if(!transitioning) {
+		ESP_LOGI(TAG, "u8g2_DrawBox");
+		u8g2_DrawBox(display, ox + 20, 26, (u8g2_uint_t)(sensorPercentage * (display_width - 40)), 6);
+		u8g2_DrawFrame(display, ox + 20, 26, display_width - 40, 6);
+//	}
+
+//			asprintf(&text, "%d", sensor_values[sensor]);
+//		u8g2_DrawStr(display, ox, oy+65, text);
+//		free(text);
+	//	char *text;
+
+}
 
 void app_main(void) {
 	initialize_mux_pins();
-	initialize_adc_pins();
+	config.unit = ADC_UNIT;
+	config.channel = ADC_CHANNEL;
+	config.atten = ADC_ATTENUATION;
+	config.width = ADC_WIDTH;
 
-	u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
-	u8g2_esp32_hal.sda = PIN_SDA;
-	u8g2_esp32_hal.scl = PIN_SCL;
-	u8g2_esp32_hal_init(u8g2_esp32_hal);
+	initialize_adc_pin(&config);
+	initialize_display(&u8g2, PIN_SDA, PIN_SCL);
 
-	u8g2_t u8g2; // a structure which will contain all the data for one display
-	u8g2_Setup_sh1106_i2c_128x64_noname_f(&u8g2,
-			U8G2_R0, u8g2_esp32_i2c_byte_cb, u8g2_esp32_gpio_and_delay_cb); // init u8g2 structure
-	u8x8_SetI2CAddress(&u8g2.u8x8, 0x78);
+	displayData.display = &u8g2;
+	displayData.frames = malloc(sizeof(frame_callback) * SENSOR_COUNT);
+	displayData.frame_count= SENSOR_COUNT;
+	displayData.frame_duration_ms = 1000;
+	displayData.frame_transition_ms = 100;
 
-	ESP_LOGI(TAG, "u8g2_InitDisplay");
-	u8g2_InitDisplay(&u8g2); // send init sequence to the display, display is in sleep mode after this,
-
-	ESP_LOGI(TAG, "u8g2_SetPowerSave");
-	u8g2_SetPowerSave(&u8g2, 0); // wake up display
-
-	//	u8g2_t* display = (u8g2_t*)pvParameters;
-	u8g2_t *display = &u8g2;
-	struct timeval tv_now;
-	gettimeofday(&tv_now, NULL);
-
-	time_t initialTime = tv_now.tv_sec;
-
-	xTaskCreate(&task_sensor_read, "sensor_read", 1000, NULL, 1, NULL);
-
-	while (1) {
-		gettimeofday(&tv_now, NULL);
-		time_t currentTime = tv_now.tv_sec;
-		int delta = (currentTime - initialTime) % 60;
-
-		ESP_LOGI(TAG, "u8g2_ClearBuffer");
-		u8g2_ClearBuffer(display);
-
-		ESP_LOGI(TAG, "u8g2_DrawBox");
-		u8g2_DrawBox(display, 0, 26, delta, 6);
-		u8g2_DrawFrame(display, 0, 26, 60, 6);
-
-		ESP_LOGI(TAG, "u8g2_SetFont");
-		u8g2_SetFont(display, u8g2_font_8x13_mf);
-
-		char *text;
-		asprintf(&text, "T%2d S%d-%d%d%d V%d", delta, sensor, mux_select_bits[2], mux_select_bits[1],mux_select_bits[0], sensor_values[sensor]);
-
-		ESP_LOGI(TAG, "u8g2_DrawStr");
-		u8g2_DrawStr(display, 2, 17, text);
-		free(text);
-
-		ESP_LOGI(TAG, "u8g2_SendBuffer");
-		u8g2_SendBuffer(display);
-		vTaskDelay(1000 / portTICK_RATE_MS);
+	for(uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+		displayData.frames[i] = sensor_reading_render;
 	}
+
+	xTaskCreate(&task_sensor_read, "sensor_read", 5000, &config, 1, NULL);
+	xTaskCreate(&task_update_display, "update_display", 5000, &displayData, 5, NULL);
+
 
 	ESP_LOGI(TAG, "All done!");
 
