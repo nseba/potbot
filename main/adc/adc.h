@@ -11,7 +11,7 @@
 
 
 #define DEFAULT_VREF    1100        //Use adc2_vref_to_gpio() to obtain a better estimate
-#define NO_OF_SAMPLES   64          //Multisampling
+#define NO_OF_SAMPLES   20          //Multisampling
 
 
 
@@ -36,5 +36,5 @@ struct adc_config_struct {
 
 typedef struct adc_config_struct adc_t;
 
-void initialize_adc_pin(adc_t* config);
-uint32_t read_adc_pin(adc_t* config);
+void initializeAdcPin(adc_t* config);
+uint16_t readAdcPin(adc_t* config);

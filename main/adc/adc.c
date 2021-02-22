@@ -32,7 +32,7 @@ static void print_char_val_type(esp_adc_cal_value_t val_type)
 
 
 
-void initialize_adc_pin(adc_t* config) {
+void initializeAdcPin(adc_t* config) {
 #if CONFIG_IDF_TARGET_ESP32
 	//Check if Two Point or Vref are burned into eFuse
 	check_efuse();
@@ -53,7 +53,7 @@ void initialize_adc_pin(adc_t* config) {
 #endif
 }
 
-uint32_t read_adc_pin(adc_t* config) {
+uint16_t readAdcPin(adc_t* config) {
 
 	uint32_t adc_reading = 0;
 	//Multisampling
@@ -71,9 +71,9 @@ uint32_t read_adc_pin(adc_t* config) {
 #if CONFIG_IDF_TARGET_ESP32
 	//Convert adc_reading to voltage in mV
 	uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, config->adc_chars);
-//	printf("Raw: %d\tVoltage: %dmV\n", adc_reading, voltage);
+	printf("ADC%d CH%d Raw: %d Voltage %dmV\t\n", config->unit, config->channel, adc_reading, voltage);
 #elif CONFIG_IDF_TARGET_ESP32S2
 	printf("ADC%d CH%d Raw: %d\t\n", config->unit, config->channel, adc_reading);
 #endif
-	return adc_reading;
+	return (uint16_t)adc_reading;
 }

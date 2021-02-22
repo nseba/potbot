@@ -12,143 +12,135 @@
 #include "oled/oled.h"
 #include "adc/adc.h"
 #include "mux/mux.h"
+#include <stdatomic.h>
 
 #define SENSOR_COUNT 3
-#define SENSOR_MIN 1250
-#define SENSOR_MAX 3605
 
+// pins for ADC
+#define ADC_CHANNEL ADC_CHANNEL_6
+#define ADC_WIDTH ADC_WIDTH_BIT_12
+#define ADC_ATTENUATION ADC_ATTEN_DB_11
+#define ADC_UNIT ADC_UNIT_1
+
+
+volatile uint16_t sensorMin =  4400;
+volatile uint16_t sensorMax =  0;
 uint8_t sensor = 0;
-uint32_t sensor_values[SENSOR_COUNT];
-static const char* sensor_labels[SENSOR_COUNT] = { "Busuioc", "Menta", "Oregano" };
-static uint8_t mux_select_pins[3] = {PIN_S0, PIN_S1, PIN_S2};
+volatile uint16_t sensorValues[SENSOR_COUNT];
+static const char* sensorLabels[SENSOR_COUNT] = { "Busuioc", "Menta", "Oregano" };
+static uint8_t muxSelectPins[3] = {PIN_S0, PIN_S1, PIN_S2};
 
 adc_t config;
 u8g2_t u8g2; // a structure which will contain all the data for one display
 display_data_t displayData;
 
-void task_sensor_read(void* configParam) {
+void taskSensorRead(void* configParam) {
 	adc_t* config = (adc_t*)configParam;
 	while(1) {
 		for(sensor = 0; sensor < SENSOR_COUNT; ++sensor) {
-			select_mux_input(sensor, mux_select_pins);
-			uint32_t adc_reading = read_adc_pin(config);
-			sensor_values[sensor] = adc_reading;
+			select_mux_input(sensor, muxSelectPins);
+			uint16_t adc_reading = readAdcPin(config);
+			atomic_store(&sensorValues[sensor], adc_reading);
+			ESP_LOGI(TAG, "S:%d V:%d m:%d M:%d",sensor, adc_reading, sensorMin, sensorMax);
+			uint16_t currentSensorMin = atomic_load(&sensorMin);
+			uint16_t currentSensorMax = atomic_load(&sensorMax);
+			atomic_store(&sensorMin, fmin(currentSensorMin, adc_reading));
+			atomic_store(&sensorMax, fmax(currentSensorMax, adc_reading));
 		}
 	}
 }
 
-void renderFrames(display_data_t* data, uint8_t frames[2], int16_t x, int16_t y, bool transitioning) {
+void renderFrames(display_data_t* data, uint8_t frames[2], int16_t x, int16_t y, int64_t elapsedTime, int64_t stateElapsedTime, bool transitioning) {
 	u8g2_t* display = data->display;
 
-	ESP_LOGI(TAG, "u8g2_ClearBuffer");
+	//ESP_LOGI(TAG, "u8g2_ClearBuffer");
 	u8g2_ClearBuffer(display);
 	for(uint8_t i = 0; i< 2; ++i){
-		data->frames[frames[i]](display, x + i * display->width, 0, frames[i], transitioning, data->frame_data);
+		data->frames[frames[i]](display, x + i * display->width, 0, frames[i], elapsedTime, stateElapsedTime, transitioning, data->frame_data);
 	}
 
-	ESP_LOGI(TAG, "u8g2_SendBuffer");
+	//ESP_LOGI(TAG, "u8g2_SendBuffer");
 	u8g2_SendBuffer(display);
 }
 
 
-void task_update_display(void* displayParam) {
+void taskUpdateDisplay(void* displayParam) {
 	display_data_t* data = (display_data_t*)displayParam;
 	u8g2_t* display = data->display;
+	u8g2_uint_t display_width = u8g2_GetDisplayWidth(display);
 
 
-	int16_t x = 0;
+	double x = 0;
 	uint8_t frames[2];
 	uint8_t current_frame = 0;
 
+	int64_t previousTime = esp_timer_get_time();
+	int64_t stateStartTime = previousTime;
+	bool transitioning = false;
+
 	while (1) {
+
+		int64_t currentTime = esp_timer_get_time();
+		int64_t elapsedTime = currentTime - previousTime;
+		int64_t stateElapsedTime = currentTime - stateStartTime;
+		previousTime = currentTime;
 
 		frames[0] = current_frame;
 		frames[1] = (current_frame + 1) % data->frame_count;
 
-		renderFrames(data, frames, x, 0, false);
-
-		vTaskDelay(data->frame_duration_ms / portTICK_RATE_MS);
-
-		TickType_t xLastWakeTime;
-		xLastWakeTime = xTaskGetTickCount ();
-		const TickType_t xFrequency = 10;
-
-		TickType_t xWakeTime = xLastWakeTime;
-		for(;;) {
-			// Wait for the next cycle.
-			vTaskDelayUntil( &xLastWakeTime, xFrequency );
-
-			int16_t delta = display->width  * (xLastWakeTime - xWakeTime) / data->frame_transition_ms;
-			if(delta > 0) {
-				x = fmax(-display->width, x-delta);
-				xWakeTime = xLastWakeTime;
-			}
-
-			renderFrames(data, frames, x, 0, true);
-
-			if (x == - display->width) {
-				x = 0;
-				current_frame=frames[1];
-
-				break;
-			}
+		if(transitioning) {
+			x = fmax(-display_width, -1.0 * display_width * stateElapsedTime / (data->frame_transition_ms * 1000.0));
 		}
 
+		renderFrames(data, frames, (int64_t)x, 0, elapsedTime, stateElapsedTime, transitioning);
+		if(transitioning && stateElapsedTime > (data->frame_transition_ms * 1000)) {
+			transitioning = false;
+			stateStartTime = esp_timer_get_time();
+			x = 0;
+			current_frame=frames[1];
 
-		//		ESP_LOGI(TAG, "u8g2_DrawBox");
-		//		u8g2_DrawBox(display, 0, 26, sensor_values[sensor], 6);
-		//		u8g2_DrawFrame(display, 0, 26, 100, 6);
+		} else if(!transitioning && stateElapsedTime > (data->frame_duration_ms * 1000)) {
+			transitioning = true;
+			stateStartTime = esp_timer_get_time();
+		}
 
-
-		//		ESP_LOGI(TAG, "u8g2_SetFont");
-		//		u8g2_SetFont(display, u8g2_font_8x13_mf);
-		//
-		//		u8g2_uint_t text_width = u8g2_GetStrWidth(display, sensor_labels[sensor]);
-		//		u8g2_uint_t display_width = u8g2_GetDisplayWidth(display);
-		//		u8g2_uint_t text_position = (display_width - text_width) / 2;
-		//		u8g2_DrawStr(display, text_position, 17, sensor_labels[sensor]);
-		//
-		//		char *text;
-		//		asprintf(&text, "%2d", delta);
-		//		//		asprintf(&text, "T%2d S%d-%d%d%d V%d", delta, sensor, mux_select_bits[2], mux_select_bits[1],mux_select_bits[0], sensor_values[sensor]);
-		//		//		asprintf(&text, "S%d-%d%d%d V%d", sensor, mux_select_bits[2], mux_select_bits[1],mux_select_bits[0], sensor_values[sensor]);
-		//
-		//		ESP_LOGI(TAG, "u8g2_DrawStr");
-		//		u8g2_DrawStr(display, 2, 35, text);
-		//		free(text);
-
-
-		//vTaskDelay(10 / portTICK_RATE_MS);
+		vTaskDelay(1000 / portTICK_RATE_MS);
 	}
 }
 
-void sensor_reading_render(u8g2_t* display, int16_t ox, int16_t oy, uint8_t sensor, bool transitioning, void* ignore) {
-	u8g2_SetFont(display, u8g2_font_8x13_mf);
-	u8g2_uint_t text_width = u8g2_GetStrWidth(display, sensor_labels[sensor]);
-	u8g2_uint_t display_width = u8g2_GetDisplayWidth(display);
-	u8g2_uint_t text_position = (display_width - text_width) / 2;
-	u8g2_DrawStr(display, ox+text_position, oy+17, sensor_labels[sensor]);
+void sensorReadingRender(u8g2_t* display, int16_t ox, int16_t oy, uint8_t sensor, int64_t elapsedTime, int64_t stateElapsedTime,  bool transitioning, void* ignore) {
 
-	uint32_t normalizedSensorValue = fmax(0, fmin(SENSOR_MAX, SENSOR_MAX - sensor_values[sensor]));
-	float sensorPercentage = fmax(0, fmin(1, (normalizedSensorValue * 1.0 ) / (SENSOR_MAX - SENSOR_MIN)));
+	const uint8_t* font = u8g2_font_8x13_mf;
+	drawCenteredString(display, ox, oy+ 17, sensorLabels[sensor], font);
+
+	uint16_t currentSensorMin = atomic_load(&sensorMin);
+	uint16_t currentSensorMax = atomic_load(&sensorMax);
+	uint16_t sensorValue = atomic_load(&sensorValues[sensor]);
+
+	//uint32_t normalizedSensorValue = fmax(0, fmin(sensorMax, sensorMax - sensorValues[sensor]));
+	float sensorPercentage = (sensorValue - currentSensorMin) * 1.0 / (currentSensorMax-currentSensorMin);
 
 	char *text;
-	asprintf(&text, "%2.1f%%", sensorPercentage*100.0);
-	text_width = u8g2_GetStrWidth(display, text);
-	text_position = (display_width - text_width) / 2;
-	u8g2_DrawStr(display, ox+text_position, oy+50, text);
+	switch((stateElapsedTime / 2000000)% 2) {
+//	case 1:
+//		asprintf(&text, "%d", normalizedSensorValue);
+//		break;
+	case 1:
+		asprintf(&text, "%d[%d-%d]", sensorValues[sensor], sensorMin, sensorMax);
+		break;
+	default:
+		asprintf(&text, "%2.1f%%", sensorPercentage*100.0);
+		break;
+
+	}
+	drawCenteredString(display, ox, oy+50, text, font);
 	free(text);
 
-//	if(!transitioning) {
-		ESP_LOGI(TAG, "u8g2_DrawBox");
-		u8g2_DrawBox(display, ox + 20, 26, (u8g2_uint_t)(sensorPercentage * (display_width - 40)), 6);
-		u8g2_DrawFrame(display, ox + 20, 26, display_width - 40, 6);
-//	}
 
-//			asprintf(&text, "%d", sensor_values[sensor]);
-//		u8g2_DrawStr(display, ox, oy+65, text);
-//		free(text);
-	//	char *text;
+//	ESP_LOGI(TAG, "u8g2_DrawBox");
+	u8g2_uint_t display_width = u8g2_GetDisplayWidth(display);
+	u8g2_DrawBox(display, ox + 20, 26, (u8g2_uint_t)(sensorPercentage * (display_width - 40)), 6);
+	u8g2_DrawFrame(display, ox + 20, 26, display_width - 40, 6);
 
 }
 
@@ -159,21 +151,21 @@ void app_main(void) {
 	config.atten = ADC_ATTENUATION;
 	config.width = ADC_WIDTH;
 
-	initialize_adc_pin(&config);
+	initializeAdcPin(&config);
 	initialize_display(&u8g2, PIN_SDA, PIN_SCL);
 
 	displayData.display = &u8g2;
 	displayData.frames = malloc(sizeof(frame_callback) * SENSOR_COUNT);
 	displayData.frame_count= SENSOR_COUNT;
-	displayData.frame_duration_ms = 1000;
-	displayData.frame_transition_ms = 100;
+	displayData.frame_duration_ms = 4000;
+	displayData.frame_transition_ms = 300;
 
 	for(uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-		displayData.frames[i] = sensor_reading_render;
+		displayData.frames[i] = sensorReadingRender;
 	}
 
-	xTaskCreate(&task_sensor_read, "sensor_read", 5000, &config, 1, NULL);
-	xTaskCreate(&task_update_display, "update_display", 5000, &displayData, 5, NULL);
+	xTaskCreatePinnedToCore(&taskSensorRead, "sensor_read", 5000, &config, 1, NULL, CORE_ID_APP);
+	xTaskCreate(&taskUpdateDisplay, "update_display", 5000, &displayData, 5, NULL);
 
 
 	ESP_LOGI(TAG, "All done!");

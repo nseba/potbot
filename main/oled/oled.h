@@ -4,7 +4,7 @@
 
 static const char *TAG = "sh1106";
 
-typedef void (*frame_callback)(u8g2_t* display, int16_t ox, int16_t oy, uint8_t current_frame, bool transitioning, void* data);
+typedef void (*frame_callback)(u8g2_t* display, int16_t ox, int16_t oy, uint8_t current_frame, int64_t elapsedTime, int64_t stateElapsedTime, bool transitioning, void* data);
 
 struct display_data_struct {
 	u8g2_t* display;
@@ -18,3 +18,6 @@ struct display_data_struct {
 typedef struct display_data_struct display_data_t;
 
 void initialize_display(u8g2_t* display, gpio_num_t sdaPin, gpio_num_t sclPin);
+
+
+void drawCenteredString(u8g2_t* display, int16_t x, int16_t y, const char *text, const uint8_t  *font);

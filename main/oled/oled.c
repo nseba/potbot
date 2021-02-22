@@ -23,3 +23,9 @@ void initialize_display(u8g2_t* display, gpio_num_t sdaPin, gpio_num_t sclPin) {
 }
 
 
+void drawCenteredString(u8g2_t* display, int16_t ox, int16_t oy, const char *text, const uint8_t  *font) {
+	u8g2_SetFont(display, font);
+	u8g2_uint_t text_width = u8g2_GetStrWidth(display, text);
+	u8g2_uint_t text_position = (display->width - text_width) / 2;
+	u8g2_DrawStr(display, ox+text_position, oy, text);
+}
